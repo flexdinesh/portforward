@@ -1,0 +1,122 @@
+[tools]
+go = "1"
+"aqua:evilmartians/lefthook" = "2.1.16"
+
+[task_config]
+dir = "{{ env.PORTFORWARD_CHECK_ROOT | default(value=config_root) }}"
+
+[tasks.setup]
+description = "Download dependencies and install Git hooks"
+depends = ["deps", "hooks"]
+
+[tasks.deps]
+description = "Download Go dependencies"
+run = "go mod download"
+
+[tasks.hooks]
+description = "Install project Git hooks"
+run = "lefthook install"
+
+[tasks.fmt]
+description = "Format Go source"
+run = "gofmt -w ."
+
+[tasks."fmt:check"]
+description = "Check Go formatting without editing files"
+run = '''
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  printf '%s\n' "$unformatted" >&2
+  echo "Run mise run fmt before pushing." >&2
+  exit 1
+fi
+'''
+
+[tasks.tidy]
+description = "Tidy Go module files"
+run = "go mod tidy"
+
+[tasks."tidy:check"]
+description = "Check module tidiness without editing files"
+run = "go mod tidy -diff"
+
+[tasks.vet]
+description = "Run Go static analysis"
+run = "go vet ./..."
+
+[tasks.test]
+description = "Run all tests"
+run = "go test ./..."
+raw_args = true
+
+[tasks."test:package"]
+description = "Run tests for supplied packages and Go test flags"
+run = "go test"
+raw_args = true
+
+[tasks."test:race"]
+description = "Run all tests uncached with race detection"
+run = "go test -race -count=1 ./..."
+
+[tasks."test:integration"]
+description = "Test the built CLI with a local OpenSSH server (requires sshd and ssh-keygen)"
+run = "go test -tags=integration -count=1 -timeout=60s ./cmd/portforward"
+
+[tasks.build]
+description = "Build bin/portforward"
+run = "go build -o bin/portforward ./cmd/portforward"
+
+[tasks."build:check"]
+description = "Build all packages without writing a project binary"
+run = "go build ./..."
+
+[tasks.install]
+description = "Install the local CLI into the Go bin directory"
+run = "go install ./cmd/portforward"
+
+[tasks.run]
+description = "Run portforward with supplied CLI arguments"
+run = "go run ./cmd/portforward"
+raw = true
+raw_args = true
+
+[tasks.check]
+description = "Run full local validation"
+depends = ["fmt:check", "tidy:check", "vet", "test:race", "build:check"]
+
+[tasks.ci]
+description = "Run light CI validation"
+depends = ["fmt:check", "build:check"]
+
+[tasks."pre-push"]
+description = "Validate committed revisions supplied by Git"
+run = "./scripts/pre-push.sh"
+raw = true
+
+[tasks."release:check"]
+description = "Validate before publishing a stable release"
+depends = ["check"]
+
+[tasks."release:version"]
+description = "Print the next release version"
+run = "go run ./tools/release-version"
+
+[tasks."release:formula"]
+description = "Generate a Homebrew formula from release checksums"
+run = "go run ./tools/homebrew-formula --"
+raw_args = true
+
+[tasks."release:config"]
+description = "Validate GoReleaser configuration"
+tools = { "aqua:goreleaser/goreleaser" = "2.18.2" }
+run = "goreleaser check"
+
+[tasks."release:formula:check"]
+description = "Check syntax of a supplied Homebrew formula"
+run = "ruby -c"
+raw_args = true
+
+[tasks.release]
+description = "Publish the tagged stable release with GoReleaser"
+tools = { "aqua:goreleaser/goreleaser" = "2.18.2" }
+run = "goreleaser release --clean"
