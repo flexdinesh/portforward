@@ -1,0 +1,9 @@
+.DS_Store
+*.log
+.cache/
+coverage/
+dist/
+build/
+bin/
+release-dist/
+homebrew-tap/
