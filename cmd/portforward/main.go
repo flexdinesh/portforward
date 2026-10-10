@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -108,6 +109,17 @@ func execute(ctx context.Context, options args.Options, manager *forward.Manager
 			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", entry.Local(), entry.SSHHost, entry.Destination(), entry.Status)
 		}
 		return writer.Flush()
+	case "reconnect":
+		restored, err := manager.Reconnect(ctx)
+		for _, mapping := range restored {
+			if _, writeErr := fmt.Fprintf(stdout, "Reconnected %s → %s through %s.\n", mapping.Local(), mapping.Destination(), mapping.SSHHost); writeErr != nil {
+				return errors.Join(err, writeErr)
+			}
+		}
+		if len(restored) == 0 && err == nil {
+			_, err = fmt.Fprintln(stdout, "No disconnected forwards to reconnect.")
+		}
+		return err
 	case "add":
 		changed, err := manager.Add(ctx, options.Mapping)
 		if err != nil {

@@ -111,69 +111,133 @@ func (m *Manager) Add(ctx context.Context, mapping Mapping) (bool, error) {
 	}
 	changed := false
 	err := m.store.WithLock(ctx, func(tx Transaction) error {
+		var err error
+		changed, err = m.add(ctx, tx, mapping)
+		return err
+	})
+	return changed, err
+}
+
+// Reconnect restores disconnected mappings while holding the state lock so a
+// concurrent remove cannot be undone. Pending removals are never restored.
+func (m *Manager) Reconnect(ctx context.Context) ([]Mapping, error) {
+	var restored []Mapping
+	err := m.store.WithLock(ctx, func(tx Transaction) error {
 		records, err := tx.Load()
 		if err != nil {
 			return err
 		}
-		index := slices.IndexFunc(records, func(r Record) bool { return r.SameListener(mapping) })
-		if index >= 0 {
-			existing := records[index]
-			if existing.Mapping != mapping {
-				return fmt.Errorf("%s already maps to %s through %s; remove it first", mapping.Local(), existing.Destination(), existing.SSHHost)
+		slices.SortFunc(records, func(a, b Record) int {
+			if a.BindAddress < b.BindAddress {
+				return -1
 			}
-			if existing.Phase == Removing {
-				return fmt.Errorf("%s has a pending removal; retry remove first", mapping.Local())
+			if a.BindAddress > b.BindAddress {
+				return 1
 			}
-			alive, err := m.tunnels.Alive(ctx, existing.Connection())
+			return a.LocalPort - b.LocalPort
+		})
+		type health struct {
+			alive bool
+			err   error
+		}
+		connections := make(map[Connection]health)
+		var failures []error
+		for _, record := range records {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(failures, err)...)
+			}
+			if record.Phase == Removing {
+				continue
+			}
+			connection := record.Connection()
+			h, ok := connections[connection]
+			if !ok {
+				h.alive, h.err = m.tunnels.Alive(ctx, connection)
+				connections[connection] = h
+			}
+			if h.err != nil {
+				failures = append(failures, fmt.Errorf("%s through %s: %w", record.Local(), record.SSHHost, h.err))
+				continue
+			}
+			if h.alive {
+				if record.Phase != Active {
+					failures = append(failures, fmt.Errorf("%s: pending %s; retry add or remove", record.Local(), record.Phase))
+				}
+				continue
+			}
+			changed, err := m.add(ctx, tx, record.Mapping)
+			if changed {
+				restored = append(restored, record.Mapping)
+			}
 			if err != nil {
-				return err
-			}
-			if alive && existing.Phase == Active {
-				return nil
+				failures = append(failures, fmt.Errorf("%s through %s: %w", record.Local(), record.SSHHost, err))
 			}
 		}
-		connection, alive, err := m.connection(ctx, records, mapping.SSHHost)
-		if err != nil {
-			return err
-		}
-		original := slices.Clone(records)
-		pending := Record{Mapping: mapping, ConnectionID: connection.ID, Phase: Adding}
-		if index < 0 {
-			index = len(records)
-			records = append(records, pending)
-		} else {
-			records[index] = pending
-		}
-		if err := tx.Save(records); err != nil {
-			return err
-		}
-		if !alive {
-			if err := m.tunnels.Start(ctx, connection); err != nil {
-				// Keep intent: authentication may have completed while the caller
-				// was interrupted. A retry can find and clean up the owned master.
-				cleanupCtx, cancel := cleanupContext(ctx)
-				defer cancel()
-				return errors.Join(err, m.tunnels.Stop(cleanupCtx, connection))
-			}
-		}
-		if err := m.tunnels.Forward(ctx, connection, mapping); err != nil {
-			return m.rollback(ctx, tx, original, connection, mapping, err)
-		}
-		records[index].Phase = Active
-		if err := tx.Save(records); err != nil {
-			var published *PublishedError
-			if errors.As(err, &published) {
-				// The visible snapshot already agrees with the live listener.
-				// Rolling back SSH could contradict that published active state.
-				changed = true
-				return err
-			}
-			return m.rollback(ctx, tx, original, connection, mapping, err)
-		}
-		changed = true
-		return nil
+		return errors.Join(failures...)
 	})
-	return changed, err
+	return restored, err
+}
+
+func (m *Manager) add(ctx context.Context, tx Transaction, mapping Mapping) (bool, error) {
+	records, err := tx.Load()
+	if err != nil {
+		return false, err
+	}
+	index := slices.IndexFunc(records, func(r Record) bool { return r.SameListener(mapping) })
+	if index >= 0 {
+		existing := records[index]
+		if existing.Mapping != mapping {
+			return false, fmt.Errorf("%s already maps to %s through %s; remove it first", mapping.Local(), existing.Destination(), existing.SSHHost)
+		}
+		if existing.Phase == Removing {
+			return false, fmt.Errorf("%s has a pending removal; retry remove first", mapping.Local())
+		}
+		alive, err := m.tunnels.Alive(ctx, existing.Connection())
+		if err != nil {
+			return false, err
+		}
+		if alive && existing.Phase == Active {
+			return false, nil
+		}
+	}
+	connection, alive, err := m.connection(ctx, records, mapping.SSHHost)
+	if err != nil {
+		return false, err
+	}
+	original := slices.Clone(records)
+	pending := Record{Mapping: mapping, ConnectionID: connection.ID, Phase: Adding}
+	if index < 0 {
+		index = len(records)
+		records = append(records, pending)
+	} else {
+		records[index] = pending
+	}
+	if err := tx.Save(records); err != nil {
+		return false, err
+	}
+	if !alive {
+		if err := m.tunnels.Start(ctx, connection); err != nil {
+			// Keep intent: authentication may have completed while the caller
+			// was interrupted. A retry can find and clean up the owned master.
+			cleanupCtx, cancel := cleanupContext(ctx)
+			defer cancel()
+			return false, errors.Join(err, m.tunnels.Stop(cleanupCtx, connection))
+		}
+	}
+	if err := m.tunnels.Forward(ctx, connection, mapping); err != nil {
+		return false, m.rollback(ctx, tx, original, connection, mapping, err)
+	}
+	records[index].Phase = Active
+	if err := tx.Save(records); err != nil {
+		var published *PublishedError
+		if errors.As(err, &published) {
+			// The visible snapshot already agrees with the live listener.
+			// Rolling back SSH could contradict that published active state.
+			return true, err
+		}
+		return false, m.rollback(ctx, tx, original, connection, mapping, err)
+	}
+	return true, nil
 }
 
 func (m *Manager) connection(ctx context.Context, records []Record, host string) (Connection, bool, error) {

@@ -62,6 +62,14 @@ A dead generation stays dead in older records. Reconnecting one mapping cannot
 make an unrestored sibling look active; later explicit adds can join the new
 generation. Different supplied aliases remain distinct SSH destinations.
 
+Reconnect holds the exclusive lock while inspecting saved generations and
+restoring disconnected mappings in list order through the same add milestones.
+It leaves live mappings and pending removals untouched, reports unknown statuses,
+and continues after individual failures unless cancelled. Each add reloads the
+latest transaction snapshot, so later siblings can join a restored generation
+without losing earlier state updates. Concurrent removal cannot be undone by
+reconnection from a stale read.
+
 For failures before the final snapshot is published, cancel the requested
 forward, close an otherwise unreferenced master, and restore the original
 snapshot. Compensation gets a separate five-second budget even after caller
