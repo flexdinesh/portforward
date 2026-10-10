@@ -27,6 +27,9 @@ func TestRun(t *testing.T) {
 		{name: "extra version args", args: []string{"--version", "extra"}, code: 2, stderr: "invalid command"},
 		{name: "empty list", args: []string{"list"}, stdout: "No managed forwards.\n"},
 		{name: "empty JSON", args: []string{"list", "--json"}, stdout: "[]\n"},
+		{name: "empty reconnect", args: []string{"reconnect"}, stdout: "No disconnected forwards to reconnect.\n"},
+		{name: "reconnect help", args: []string{"reconnect", "--help"}, stdout: "portforward reconnect"},
+		{name: "invalid reconnect", args: []string{"reconnect", "5432"}, code: 2, stderr: "usage: portforward reconnect"},
 		{name: "missing remove", args: []string{"remove", "5432", "prod"}, stdout: "No matching forward.\n"},
 		{name: "invalid add", args: []string{"add", "0", "prod"}, code: 2, stderr: "invalid port"},
 	}
@@ -58,6 +61,7 @@ func TestConfigurationErrorsDoNotChangeDestination(t *testing.T) {
 		{[]string{"--version"}, 0},
 		{[]string{"add", "0", "prod"}, 2},
 		{[]string{"list"}, 1},
+		{[]string{"reconnect"}, 1},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(context.Background(), test.input, &stdout, &stderr); code != test.code {

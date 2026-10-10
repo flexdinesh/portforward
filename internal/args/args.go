@@ -11,6 +11,7 @@ const Usage = `portforward — manage local SSH port forwards
 
 Usage:
   portforward list [--json]
+  portforward reconnect
   portforward add <port> <host> [--to <host:port>] [--bind <address>]
   portforward remove <port> [<host>] [--bind <address>]
   portforward --help
@@ -19,6 +20,7 @@ Usage:
 Defaults: bind 127.0.0.1; destination localhost:<port> on the SSH server.
 Hosts may be SSH config aliases or [user@]hostname. Only managed tunnels are listed.
 Use --to for a different remote host or port; IPv6 destinations use [::1]:5432.
+Use reconnect to retry all disconnected forwards with their saved mappings.
 `
 
 type Options struct {
@@ -43,7 +45,7 @@ func Parse(input []string) (Options, error) {
 			return Options{Command: "version"}, nil
 		}
 	}
-	if command != "list" && command != "add" && command != "remove" {
+	if command != "list" && command != "reconnect" && command != "add" && command != "remove" {
 		return Options{}, fmt.Errorf("invalid command %q; run portforward --help", command)
 	}
 	if len(input) == 2 && (input[1] == "--help" || input[1] == "-h") {
@@ -68,7 +70,7 @@ func Parse(input []string) (Options, error) {
 			options.JSON = true
 			continue
 		}
-		if !(flag == "--bind" && command != "list" || flag == "--to" && command == "add") {
+		if !(flag == "--bind" && (command == "add" || command == "remove") || flag == "--to" && command == "add") {
 			return Options{}, fmt.Errorf("unsupported flag %s for %s", flag, command)
 		}
 		if !hasValue {
@@ -90,6 +92,12 @@ func Parse(input []string) (Options, error) {
 	if command == "list" {
 		if len(positional) != 0 {
 			return Options{}, fmt.Errorf("usage: portforward list [--json]")
+		}
+		return options, nil
+	}
+	if command == "reconnect" {
+		if len(positional) != 0 {
+			return Options{}, fmt.Errorf("usage: portforward reconnect")
 		}
 		return options, nil
 	}

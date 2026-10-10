@@ -37,6 +37,7 @@ func TestInvalidArguments(t *testing.T) {
 		"add 5432 prod --json", "remove", "remove 5432 prod extra", "remove 5432 --to db:5432",
 		"list extra", "list --json=true", "list --json --json", "list --bind 127.0.0.1",
 		"--version extra", "add 5432 prod --to=", "add 5432 prod --unknown",
+		"reconnect 5432", "reconnect --json", "reconnect --bind ::1", "reconnect --to db:5432",
 	} {
 		t.Run(input, func(t *testing.T) {
 			if _, err := Parse(strings.Fields(input)); err == nil {
@@ -48,6 +49,17 @@ func TestInvalidArguments(t *testing.T) {
 		if _, err := Parse([]string{"add", "5432", host}); err == nil {
 			t.Fatalf("accepted host %q", host)
 		}
+	}
+}
+
+func TestReconnect(t *testing.T) {
+	got, err := Parse([]string{"reconnect"})
+	if err != nil || got.Command != "reconnect" {
+		t.Fatalf("reconnect: %+v, %v", got, err)
+	}
+	got, err = Parse([]string{"reconnect", "--help"})
+	if err != nil || got.Command != "help" {
+		t.Fatalf("reconnect help: %+v, %v", got, err)
 	}
 }
 

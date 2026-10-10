@@ -7,6 +7,7 @@ and configuration. Requires an installed OpenSSH client on macOS or Linux.
 
 ```sh
 portforward list [--json]
+portforward reconnect
 portforward add <port> <host> [--to <host:port>] [--bind <address>]
 portforward remove <port> [<host>] [--bind <address>]
 portforward --help
@@ -56,6 +57,21 @@ stderr. Fields: `bind_address`, `local_port`, `ssh_host`,
 when empty. Known disconnections are successful list results; state corruption
 or inability to inspect state is an error.
 
+## Reconnect
+
+`portforward reconnect` retries all disconnected forwards using their saved SSH
+host, bind address, and destination. No arguments or flags are needed. Active
+forwards stay untouched. Pending removals are skipped; retry `remove` to finish
+them. Unknown statuses are reported as errors without attempting reconnection;
+live pending additions still require an explicit `add` or `remove`.
+
+Forwards are attempted in list order. Each successful reconnection prints a
+confirmation. A failure is reported without preventing attempts for remaining
+forwards; any failure returns exit code `1`. Cancellation stops further attempts.
+When nothing needs reconnecting, print `No disconnected forwards to reconnect.`
+and exit successfully. Reconnection may prompt for SSH authentication. It is an
+explicit action; `list` remains read-only and no automatic restart is promised.
+
 ## Add and remove
 
 `add` authenticates if needed, creates the listener, then returns. The tunnel
@@ -64,9 +80,10 @@ listener, not that the database or other destination service is reachable.
 
 The managed identity is `(bind address, local port)`, not `(port, SSH host)`.
 A repeated identical active mapping succeeds without duplication. An identical
-disconnected mapping reconnects on explicit `add`. A different mapping occupying
-the same managed listener fails and shows the existing destination. Overlapping
-wildcard binds can also conflict; SSH's actual bind result is authoritative.
+disconnected mapping reconnects on explicit `add` or `reconnect`. A different
+mapping occupying the same managed listener fails and shows the existing
+destination. Overlapping wildcard binds can also conflict; SSH's actual bind
+result is authoritative.
 Never kill another process to free a busy port.
 
 `remove` cancels exactly the selected forward. An optional host is a guard
@@ -89,8 +106,8 @@ and cancelling forwards. See [the OpenSSH manual](https://man.openbsd.org/ssh).
 
 Share a private live master per supplied SSH destination. Each connection
 generation has a random ID; reconnecting one forward does not change the
-status of disconnected siblings from an older generation. Aliases pointing at
-the same server remain separate destinations. Private control sockets isolate
+status of disconnected siblings from an older generation until each is restored.
+Aliases pointing at the same server remain separate destinations. Private control sockets isolate
 the tool from the user's configured ControlPath and independently started
 sessions. Master startup clears configured LocalForward/RemoteForward and
 disables agent/X11 forwarding, local commands, remote commands, and TUN devices.
@@ -138,8 +155,8 @@ and recovery details.
   inspection cannot consistently recover remote destinations, and multiplexed
   forwards may not appear in command lines. Promise managed forwards only.
 - A background tunnel can die after Wi-Fi changes or sleep. Show that honestly;
-  explicit `add` reconnects. Automatic reconnection requires supervision and
-  should be a later, deliberate feature.
+  explicit `add` or `reconnect` restores tunnels. Automatic reconnection requires
+  supervision and should be a later, deliberate feature.
 - Useful next additions: `list --watch`, named presets, and `doctor` for SSH,
   socket, and state diagnostics. Add bulk removal only with a clear selector.
 - Defer SOCKS, reverse forwarding, startup restoration, and a full-screen TUI.

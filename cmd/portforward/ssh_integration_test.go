@@ -293,8 +293,48 @@ func TestRealSSH(t *testing.T) {
 			t.Fatalf("wrong generation status: %+v", entry)
 		}
 	}
-	add(b)
+	if output := invoke(0, "reconnect"); !strings.Contains(output, fmt.Sprintf("Reconnected 127.0.0.1:%d", b)) || strings.Contains(output, fmt.Sprintf("Reconnected 127.0.0.1:%d", a)) {
+		t.Fatalf("reconnect must restore only the disconnected sibling: %s", output)
+	}
 	checkTraffic(t, b)
+	rows, err = store.Read(context.Background())
+	if err != nil || len(rows) != 2 || rows[0].ConnectionID != rows[1].ConnectionID {
+		t.Fatalf("reconnected sibling must share the live master: %v %v", rows, err)
+	}
+	if err := client.Stop(context.Background(), rows[0].Connection()); err != nil {
+		t.Fatal(err)
+	}
+	if output := invoke(0, "reconnect"); strings.Count(output, "Reconnected ") != 2 {
+		t.Fatalf("reconnect must restore both disconnected forwards: %s", output)
+	}
+	checkTraffic(t, a)
+	checkTraffic(t, b)
+	rows, err = store.Read(context.Background())
+	if err != nil || len(rows) != 2 || rows[0].ConnectionID != rows[1].ConnectionID {
+		t.Fatalf("batch reconnect must share a master: %v %v", rows, err)
+	}
+	if err := client.Stop(context.Background(), rows[0].Connection()); err != nil {
+		t.Fatal(err)
+	}
+	occupied, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { occupied.Close() })
+	if output := invoke(1, "reconnect"); !strings.Contains(output, fmt.Sprintf("Reconnected 127.0.0.1:%d", b)) || !strings.Contains(output, fmt.Sprintf("127.0.0.1:%d through testhost:", a)) {
+		t.Fatalf("partial reconnect must report success and the busy-port failure: %s", output)
+	}
+	checkTraffic(t, b)
+	if err := occupied.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if output := invoke(0, "reconnect"); !strings.Contains(output, fmt.Sprintf("Reconnected 127.0.0.1:%d", a)) {
+		t.Fatalf("reconnect must retry the previously occupied port: %s", output)
+	}
+	checkTraffic(t, a)
+	if output := invoke(0, "reconnect"); output != "No disconnected forwards to reconnect.\n" {
+		t.Fatalf("active reconnect: %s", output)
+	}
 	// Independent session on the same alias must survive managed removals.
 	independent := exec.Command("ssh", "-f", "-N", "-M", "-S", otherSocket, "-o", "RemoteCommand=none", "-o", "ClearAllForwardings=yes", "-o", "ControlPersist=no", "testhost")
 	if output, err := independent.CombinedOutput(); err != nil {
