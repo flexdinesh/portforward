@@ -2,7 +2,8 @@
 
 Project commands live in `mise.toml`, following gitsy's tooling pattern.
 Go tracks the `1` series; Lefthook and GoReleaser use exact versions.
-The module's minimum Go version is 1.26. No third-party Go dependencies.
+The module's minimum Go version is 1.26. The only third-party Go dependency is
+`golang.org/x/term`, used for the interactive `remove` picker's raw mode.
 
 ```sh
 mise trust
@@ -31,7 +32,7 @@ The pre-push hook validates each distinct pushed commit in a temporary archive,
 including annotated tags. Working files cannot mask a failing committed revision.
 `PORTFORWARD_CHECK_ROOT` selects that snapshot; temporary files are removed after
 checks. Race tests require a C compiler. CI remains light; manual releases run
-full checks. No demo task or TUI dependencies are needed.
+full checks. No demo task is needed.
 
 ## SSH integration tests
 

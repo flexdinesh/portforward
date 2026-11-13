@@ -13,7 +13,7 @@ Usage:
   portforward list [--json]
   portforward reconnect
   portforward add <port> <host> [--to <host:port>] [--bind <address>]
-  portforward remove <port> [<host>] [--bind <address>]
+  portforward remove [<port> [<host>]] [--bind <address>]
   portforward --help
   portforward --version
 
@@ -21,15 +21,17 @@ Defaults: bind 127.0.0.1; destination localhost:<port> on the SSH server.
 Hosts may be SSH config aliases or [user@]hostname. Only managed tunnels are listed.
 Use --to for a different remote host or port; IPv6 destinations use [::1]:5432.
 Use reconnect to retry all disconnected forwards with their saved mappings.
+Run remove without arguments in a terminal to choose forwards interactively.
 `
 
 type Options struct {
-	Command string
-	JSON    bool
-	Mapping forward.Mapping
-	Bind    string
-	Port    int
-	Host    string
+	Command     string
+	Interactive bool
+	JSON        bool
+	Mapping     forward.Mapping
+	Bind        string
+	Port        int
+	Host        string
 }
 
 func Parse(input []string) (Options, error) {
@@ -103,6 +105,9 @@ func Parse(input []string) (Options, error) {
 	}
 	if command == "add" && len(positional) != 2 {
 		return Options{}, fmt.Errorf("usage: portforward add <port> <host>")
+	}
+	if command == "remove" && len(positional) == 0 && !seen["--bind"] {
+		return Options{Command: command, Interactive: true}, nil
 	}
 	if command == "remove" && (len(positional) < 1 || len(positional) > 2) {
 		return Options{}, fmt.Errorf("usage: portforward remove <port> [<host>]")

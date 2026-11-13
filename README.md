@@ -24,6 +24,7 @@ portforward add 15432 bastion --to db.internal:5432
 portforward list
 portforward list --json
 portforward reconnect
+portforward remove
 portforward remove 15432
 portforward remove 5432 prod
 portforward --help

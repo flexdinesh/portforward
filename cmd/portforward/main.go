@@ -13,25 +13,56 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 
 	"github.com/flexdinesh/portforward/internal/args"
 	"github.com/flexdinesh/portforward/internal/forward"
+	"github.com/flexdinesh/portforward/internal/picker"
 	"github.com/flexdinesh/portforward/internal/ssh"
 	"github.com/flexdinesh/portforward/internal/state"
 	"github.com/flexdinesh/portforward/internal/version"
+	"golang.org/x/term"
 )
+
+// chooser selects rows interactively; nil means no interactive terminal.
+type chooser func(ctx context.Context, rows []string) ([]int, error)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, terminalChooser())
 	stop()
 	os.Exit(code)
 }
 
-func run(ctx context.Context, input []string, stdout, stderr io.Writer) int {
+func terminalChooser() chooser {
+	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
+	if !term.IsTerminal(in) || !term.IsTerminal(out) {
+		return nil
+	}
+	return func(ctx context.Context, rows []string) ([]int, error) {
+		width, height, err := term.GetSize(out)
+		if err != nil {
+			return nil, err
+		}
+		previous, err := term.MakeRaw(in)
+		if err != nil {
+			return nil, err
+		}
+		selected, err := picker.Run(ctx, os.Stdin, os.Stdout, picker.Options{
+			Title: "Remove forwards", Action: "remove", Rows: rows,
+			Width: width, Height: height, Color: os.Getenv("NO_COLOR") == "",
+		})
+		return selected, errors.Join(err, term.Restore(in, previous))
+	}
+}
+
+func run(ctx context.Context, input []string, stdout, stderr io.Writer, choose chooser) int {
 	options, err := args.Parse(input)
+	if err == nil && options.Interactive && choose == nil {
+		err = errors.New("usage: portforward remove <port> [<host>]")
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "portforward: %s\n", err)
 		return 2
@@ -57,7 +88,12 @@ func run(ctx context.Context, input []string, stdout, stderr io.Writer) int {
 	// Short, private paths avoid Unix socket limits even with a long state root.
 	client := ssh.New(socketDirectory(root), os.Stdin, os.Stdout, os.Stderr)
 	manager := forward.New(store, client)
-	if err := execute(ctx, options, manager, stdout, stderr); err != nil {
+	err = execute(ctx, options, manager, stdout, stderr, choose)
+	if errors.Is(err, picker.ErrCancelled) {
+		fmt.Fprintln(stderr, "Cancelled.")
+		return 130
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "portforward: %s\n", err)
 		return 1
 	}
@@ -86,7 +122,7 @@ func stateRoot() (string, error) {
 	return filepath.Join(home, ".local", "state", "portforward"), nil
 }
 
-func execute(ctx context.Context, options args.Options, manager *forward.Manager, stdout, stderr io.Writer) error {
+func execute(ctx context.Context, options args.Options, manager *forward.Manager, stdout, stderr io.Writer, choose chooser) error {
 	switch options.Command {
 	case "list":
 		entries, diagnostics, err := manager.List(ctx)
@@ -132,6 +168,9 @@ func execute(ctx context.Context, options args.Options, manager *forward.Manager
 		_, err = fmt.Fprintf(stdout, "%s %s → %s through %s.\n", verb, options.Mapping.Local(), options.Mapping.Destination(), options.Host)
 		return err
 	case "remove":
+		if options.Interactive {
+			return removeInteractive(ctx, manager, stdout, stderr, choose)
+		}
 		removed, err := manager.Remove(ctx, options.Bind, options.Port, options.Host)
 		if err != nil {
 			return err
@@ -145,4 +184,55 @@ func execute(ctx context.Context, options args.Options, manager *forward.Manager
 	default:
 		return fmt.Errorf("unsupported command %q", options.Command)
 	}
+}
+
+func removeInteractive(ctx context.Context, manager *forward.Manager, stdout, stderr io.Writer, choose chooser) error {
+	entries, diagnostics, err := manager.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, diagnostic := range diagnostics {
+		fmt.Fprintf(stderr, "portforward: %s\n", diagnostic)
+	}
+	if len(entries) == 0 {
+		_, err := fmt.Fprintln(stdout, "No managed forwards.")
+		return err
+	}
+	var table strings.Builder
+	writer := tabwriter.NewWriter(&table, 0, 4, 2, ' ', 0)
+	for _, entry := range entries {
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", entry.Local(), entry.SSHHost, entry.Destination(), entry.Status)
+	}
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	selected, err := choose(ctx, strings.Split(strings.TrimSuffix(table.String(), "\n"), "\n"))
+	if err != nil {
+		return err
+	}
+	failed := 0
+	for _, index := range selected {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entry := entries[index]
+		// The recorded host guards against a listener replaced after listing.
+		removed, err := manager.Remove(ctx, entry.BindAddress, entry.LocalPort, entry.SSHHost)
+		if err != nil {
+			failed++
+			fmt.Fprintf(stderr, "portforward: %s: %s\n", entry.Local(), err)
+			continue
+		}
+		message := "Removed " + entry.Local() + "."
+		if !removed {
+			message = "No matching forward."
+		}
+		if _, err := fmt.Fprintln(stdout, message); err != nil {
+			return err
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d removals failed", failed, len(selected))
+	}
+	return nil
 }

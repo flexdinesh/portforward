@@ -9,7 +9,7 @@ and configuration. Requires an installed OpenSSH client on macOS or Linux.
 portforward list [--json]
 portforward reconnect
 portforward add <port> <host> [--to <host:port>] [--bind <address>]
-portforward remove <port> [<host>] [--bind <address>]
+portforward remove [<port> [<host>]] [--bind <address>]
 portforward --help
 portforward --version
 ```
@@ -33,6 +33,7 @@ config initially, avoiding a second SSH configuration surface.
 | `remove 15432` | Remove default-bind local 15432 |
 | `remove 5432 prod` | Remove only if its recorded SSH destination is prod |
 | `remove 5432 --bind ::1` | Remove the IPv6-loopback listener |
+| `remove` | Choose forwards to remove interactively |
 
 ## List
 
@@ -93,7 +94,35 @@ Other forwards through the same host remain active; removing the last forward
 closes its owned master. Dead-master records can be removed safely without
 signalling stale PIDs.
 
-Exit codes: `0` success, `1` operational error, `2` invalid arguments. Errors go
+## Interactive remove
+
+`portforward remove` without arguments opens an inline picker when stdin and
+stdout are both terminals. Otherwise it fails with the usage error and exit code
+`2`, so scripts keep explicit selectors. `--bind` without a port is also a usage
+error. With no managed forwards it prints `No managed forwards.` and exits `0`.
+
+```text
+Remove forwards
+> [ ] 127.0.0.1:5432   prod     localhost:5432    active
+  [x] 127.0.0.1:15432  bastion  db.internal:5432  disconnected
+↑/↓ move · space select · enter remove 1 · esc cancel
+```
+
+Rows use `list` columns and order, including pending `unknown` entries that
+`remove` can finish. `↑`/`↓` or `k`/`j` move, `space` toggles, and `enter`
+removes the checked rows, or the highlighted row when none are checked. `esc`,
+`q`, or Ctrl-C cancels with `Cancelled.` on stderr and exit code `130`. The
+picker clears itself; only result lines remain. Long lists scroll. `NO_COLOR`
+disables emphasis.
+
+There is no confirmation step. Each choice is removed in list order with its
+recorded SSH host as the guard, so a listener replaced after the picker opened
+fails instead of removing a different mapping. Each removal prints its usual
+line; failures are reported and remaining choices still run. Any failure exits
+`1`. Cancellation stops further removals.
+
+Exit codes: `0` success, `1` operational error, `2` invalid arguments, `130`
+interactive cancellation. Errors go
 to stderr. `add` and `remove` produce one short confirmation line. During
 authentication, OpenSSH may display its normal prompts and diagnostics.
 
@@ -158,6 +187,8 @@ and recovery details.
   explicit `add` or `reconnect` restores tunnels. Automatic reconnection requires
   supervision and should be a later, deliberate feature.
 - Useful next additions: `list --watch`, named presets, and `doctor` for SSH,
-  socket, and state diagnostics. Add bulk removal only with a clear selector.
+  socket, and state diagnostics. Bulk removal exists only through the explicit
+  interactive picker; add non-interactive bulk removal only with a clear selector.
 - Defer SOCKS, reverse forwarding, startup restoration, and a full-screen TUI.
+  The inline remove picker is not a full-screen TUI.
   They expand lifecycle and configuration complexity beyond this first use case.

@@ -1,7 +1,8 @@
 # Architecture
 
 One CLI mode, one Go module, no application daemon. Production dependencies are
-the Go executable and an installed OpenSSH client. Build tools and the optional
+the Go executable and an installed OpenSSH client; `golang.org/x/term` provides
+raw terminal mode for the interactive remove picker. Build tools and the optional
 integration-test SSH server are development dependencies.
 
 ## Ownership and dependencies
@@ -9,6 +10,7 @@ integration-test SSH server are development dependencies.
 ```text
 cmd/portforward -> args -> forward
                -> forward
+               -> picker
                -> state -> forward, privatefs
                -> ssh   -> forward, privatefs
                -> version
@@ -35,6 +37,11 @@ forwarding and command execution. Control operations ignore SSH config and
 never connect to a new server. Three-second deadlines bound checks, additions,
 cancellations, and shutdown requests. Only startup can authenticate. No PIDs
 are persisted or signalled in production; shutdown uses the owned control socket.
+
+`picker` owns key parsing and inline rendering for interactive selection. It
+reads bytes and writes ANSI output; `cmd/portforward` owns terminal detection,
+raw mode, and removal. Interactive removal lists entries, then calls the normal
+remove path per choice with the recorded host as a guard.
 
 `privatefs` owns the shared rule for control-data paths: current-user ownership,
 0700 directories, 0600 regular files, and rejection of final-component symlinks.

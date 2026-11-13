@@ -34,7 +34,7 @@ func TestInvalidArguments(t *testing.T) {
 		"add +5432 prod", "add 5432 -prod", "add 5432 prod --to :5432",
 		"add 5432 prod --to db:0", "add 5432 prod --to db", "add 5432 prod --to",
 		"add 5432 prod --bind localhost", "add 5432 prod --bind ::1 --bind 127.0.0.1",
-		"add 5432 prod --json", "remove", "remove 5432 prod extra", "remove 5432 --to db:5432",
+		"add 5432 prod --json", "remove --bind ::1", "remove 5432 prod extra", "remove 5432 --to db:5432",
 		"list extra", "list --json=true", "list --json --json", "list --bind 127.0.0.1",
 		"--version extra", "add 5432 prod --to=", "add 5432 prod --unknown",
 		"reconnect 5432", "reconnect --json", "reconnect --bind ::1", "reconnect --to db:5432",
@@ -72,5 +72,16 @@ func TestRemoveOptionalGuard(t *testing.T) {
 		if len(input) == 3 && got.Host != "prod" || len(input) == 2 && got.Host != "" {
 			t.Fatal("incorrect host guard")
 		}
+	}
+}
+
+func TestInteractiveRemove(t *testing.T) {
+	got, err := Parse([]string{"remove"})
+	if err != nil || got.Command != "remove" || !got.Interactive {
+		t.Fatalf("interactive remove: %+v, %v", got, err)
+	}
+	got, err = Parse([]string{"remove", "5432"})
+	if err != nil || got.Interactive {
+		t.Fatalf("explicit remove became interactive: %+v, %v", got, err)
 	}
 }
