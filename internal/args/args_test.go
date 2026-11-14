@@ -11,10 +11,10 @@ func TestMappings(t *testing.T) {
 		local       string
 		destination string
 	}{
-		{"add 5432 prod", "127.0.0.1:5432", "localhost:5432"},
-		{"add 15432 user@bastion --to db.internal:5432", "127.0.0.1:15432", "db.internal:5432"},
-		{"add --bind ::1 15432 prod --to=[::1]:5432", "[::1]:15432", "[::1]:5432"},
-		{"add 5432 --bind=::ffff:127.0.0.1 prod", "127.0.0.1:5432", "localhost:5432"},
+		{"add prod 5432", "127.0.0.1:5432", "localhost:5432"},
+		{"add user@bastion 15432 --to db.internal:5432", "127.0.0.1:15432", "db.internal:5432"},
+		{"add --bind ::1 prod 15432 --to=[::1]:5432", "[::1]:15432", "[::1]:5432"},
+		{"add prod --bind=::ffff:127.0.0.1 5432", "127.0.0.1:5432", "localhost:5432"},
 	} {
 		t.Run(test.input, func(t *testing.T) {
 			got, err := Parse(strings.Fields(test.input))
@@ -30,13 +30,14 @@ func TestMappings(t *testing.T) {
 
 func TestInvalidArguments(t *testing.T) {
 	for _, input := range []string{
-		"add", "add 5432", "add 5432 prod extra", "add 0 prod", "add 65536 prod",
-		"add +5432 prod", "add 5432 -prod", "add 5432 prod --to :5432",
-		"add 5432 prod --to db:0", "add 5432 prod --to db", "add 5432 prod --to",
-		"add 5432 prod --bind localhost", "add 5432 prod --bind ::1 --bind 127.0.0.1",
-		"add 5432 prod --json", "remove --bind ::1", "remove 5432 prod extra", "remove 5432 --to db:5432",
+		"add 5432 prod", "add prod 5432 extra", "add prod 0", "add prod 65536",
+		"add prod +5432", "add -prod 5432", "add prod 5432 --to :5432",
+		"add prod 5432 --to db:0", "add prod 5432 --to db", "add prod 5432 --to",
+		"add prod 5432 --bind localhost", "add prod 5432 --bind ::1 --bind 127.0.0.1",
+		"add prod 5432 --json", "add --bind localhost", "add prod --to db", "add --to=db/x:5432",
+		"add $(evil)", "remove --bind ::1", "remove 5432 prod extra", "remove 5432 --to db:5432",
 		"list extra", "list --json=true", "list --json --json", "list --bind 127.0.0.1",
-		"--version extra", "add 5432 prod --to=", "add 5432 prod --unknown",
+		"--version extra", "add prod 5432 --to=", "add prod 5432 --unknown",
 		"reconnect 5432", "reconnect --json", "reconnect --bind ::1", "reconnect --to db:5432",
 	} {
 		t.Run(input, func(t *testing.T) {
@@ -46,7 +47,7 @@ func TestInvalidArguments(t *testing.T) {
 		})
 	}
 	for _, host := range []string{"prod\nother", "user@host;evil", "$(evil)", "", "-oProxyCommand=evil"} {
-		if _, err := Parse([]string{"add", "5432", host}); err == nil {
+		if _, err := Parse([]string{"add", host, "5432"}); err == nil {
 			t.Fatalf("accepted host %q", host)
 		}
 	}
@@ -83,5 +84,33 @@ func TestInteractiveRemove(t *testing.T) {
 	got, err = Parse([]string{"remove", "5432"})
 	if err != nil || got.Interactive {
 		t.Fatalf("explicit remove became interactive: %+v, %v", got, err)
+	}
+}
+
+func TestInteractiveAdd(t *testing.T) {
+	for _, test := range []struct {
+		input       string
+		host        string
+		bind        string
+		destination string
+	}{
+		{"add", "", "127.0.0.1", ""},
+		{"add prod", "prod", "127.0.0.1", ""},
+		{"add --bind ::ffff:127.0.0.1 --to db.internal:5432", "", "127.0.0.1", "db.internal:5432"},
+		{"add user@bastion --to=[::1]:5432", "user@bastion", "127.0.0.1", "[::1]:5432"},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			got, err := Parse(strings.Fields(test.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Command != "add" || !got.Interactive || got.Host != test.host || got.Bind != test.bind || got.Destination != test.destination {
+				t.Fatalf("unexpected options: %+v", got)
+			}
+		})
+	}
+	got, err := Parse([]string{"add", "prod", "5432"})
+	if err != nil || got.Interactive || got.Host != "prod" || got.Port != 5432 {
+		t.Fatalf("explicit add became interactive: %+v, %v", got, err)
 	}
 }

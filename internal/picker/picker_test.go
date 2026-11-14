@@ -128,3 +128,180 @@ func TestScrolling(t *testing.T) {
 		t.Fatalf("last frame = %q", last)
 	}
 }
+
+var choices = []Choice{{"prod", "forward"}, {"prod-db", "ssh config"}, {"bastion", "ssh config"}, {"Queue", ""}}
+
+func selectFrom(t *testing.T, input io.Reader, options SelectOptions) (int, string, error) {
+	t.Helper()
+	if options.Choices == nil {
+		options.Choices = choices
+	}
+	options.Title = "Choose SSH host"
+	var out bytes.Buffer
+	got, err := Select(context.Background(), input, &out, options)
+	return got, out.String(), err
+}
+
+func TestSelect(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"enter takes first row", "\r", 0},
+		{"arrows move", "\x1b[B\x1b[B\x1b[A\r", 1},
+		{"cursor clamps", "\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\r", 3},
+		{"filter by substring", "db\r", 1},
+		{"filter ignores case", "QUE\r", 3},
+		{"filter resets cursor", "\x1b[B\x1b[Bpro\r", 0},
+		{"vim and quit keys are text", "q\r", 3},
+		{"backspace widens filter", "bastx\x7f\r", 2},
+		{"ctrl-u clears filter", "zzz\x15\x1b[B\r", 1},
+		{"enter without matches waits", "zzz\r\x7f\x7f\x7fbas\r", 2},
+		{"notes are not filtered", "config\r\x15\r", 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, _, err := selectFrom(t, strings.NewReader(test.input), SelectOptions{})
+			if err != nil || got != test.want {
+				t.Fatalf("got %d, %v; want %d", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestSelectCancel(t *testing.T) {
+	for _, input := range []string{"\x1b", "\x03", "\x04", "pro\x1bx"} {
+		if _, _, err := selectFrom(t, strings.NewReader(input), SelectOptions{}); !errors.Is(err, ErrCancelled) {
+			t.Fatalf("%q: err = %v", input, err)
+		}
+	}
+	if _, _, err := selectFrom(t, strings.NewReader("p"), SelectOptions{}); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSelectRender(t *testing.T) {
+	_, out, err := selectFrom(t, keys("p", "r", "o", "\x1b[B", "\r"), SelectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := strings.Split(out, "\x1b[J")
+	want := "Choose SSH host\r\n" +
+		"Filter: pro\r\n" +
+		"  prod     forward\r\n" +
+		"> prod-db  ssh config\r\n" +
+		"type to filter · ↑/↓ move · enter select · esc cancel\r\x1b[4A"
+	if len(frames) < 3 || frames[len(frames)-2] != want {
+		t.Fatalf("frames = %q", frames)
+	}
+	if !strings.HasPrefix(out, "\x1b[?25l") || !strings.HasSuffix(out, "\x1b[J\x1b[?25h") {
+		t.Fatalf("cursor not hidden and restored: %q", out)
+	}
+	_, out, err = selectFrom(t, iotest.OneByteReader(strings.NewReader("zz\x1b")), SelectOptions{})
+	if !errors.Is(err, ErrCancelled) || !strings.Contains(out, "Filter: zz\r\n  No matches\r\n") {
+		t.Fatalf("no-match frame missing: %v, %q", err, out)
+	}
+}
+
+func TestSelectScrolling(t *testing.T) {
+	_, out, err := selectFrom(t, keys("\x1b[B", "\x1b[B", "\r"), SelectOptions{Height: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := strings.Split(out, "\x1b[J")
+	last := frames[len(frames)-2]
+	if !strings.HasPrefix(last, "Choose SSH host (3/4)\r\nFilter: \r\n  prod-db  ssh config\r\n> bastion  ssh config\r\n") {
+		t.Fatalf("last frame = %q", last)
+	}
+}
+
+func runPrompt(t *testing.T, input io.Reader, options PromptOptions) (string, string, error) {
+	t.Helper()
+	options.Label = "Local port for prod:"
+	var out bytes.Buffer
+	got, err := Prompt(context.Background(), input, &out, options)
+	return got, out.String(), err
+}
+
+func validPort(value string) error {
+	if value == "" || len(value) > 5 {
+		return errors.New("invalid port")
+	}
+	return nil
+}
+
+func TestPrompt(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"digits", "5432\r", "5432"},
+		{"non-digits ignored", "5a4 3x2\r", "5432"},
+		{"backspace", "54321\x7f\r", "5432"},
+		{"ctrl-u clears", "99\x155432\r", "5432"},
+		{"invalid then retry", "\r123456\r\x7f\r", "12345"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, _, err := runPrompt(t, strings.NewReader(test.input), PromptOptions{Digits: true, Validate: validPort})
+			if err != nil || got != test.want {
+				t.Fatalf("got %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	if got, _, err := runPrompt(t, strings.NewReader("a b\r"), PromptOptions{}); err != nil || got != "a b" {
+		t.Fatalf("text prompt: %q, %v", got, err)
+	}
+}
+
+func TestPromptCancel(t *testing.T) {
+	for _, input := range []string{"\x1b", "54\x03", "\x04"} {
+		if _, _, err := runPrompt(t, strings.NewReader(input), PromptOptions{Digits: true}); !errors.Is(err, ErrCancelled) {
+			t.Fatalf("%q: err = %v", input, err)
+		}
+	}
+}
+
+func TestPromptRender(t *testing.T) {
+	_, out, err := runPrompt(t, iotest.OneByteReader(strings.NewReader("5\r\x7f6\r")), PromptOptions{Digits: true, Validate: func(value string) error {
+		if value != "6" {
+			return errors.New("invalid port")
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := strings.Split(out, "\x1b[J")
+	for _, want := range []string{
+		"Local port for prod: _\r\nenter confirm · esc cancel\r\x1b[1A",
+		"Local port for prod: 5_\r\ninvalid port\r\x1b[1A",
+		"Local port for prod: _\r\nenter confirm · esc cancel\r\x1b[1A",
+		"Local port for prod: 6_\r\nenter confirm · esc cancel\r\x1b[1A",
+	} {
+		if !slices.Contains(frames, want) {
+			t.Fatalf("missing frame %q in %q", want, frames)
+		}
+	}
+	if !strings.HasSuffix(out, "\x1b[J\x1b[?25h") {
+		t.Fatalf("prompt not cleared: %q", out)
+	}
+	_, out, err = runPrompt(t, strings.NewReader("5\r"), PromptOptions{Color: true, Width: 12})
+	if err != nil || !strings.Contains(out, "Local port\x1b[7m \x1b[0m") {
+		t.Fatalf("styled prompt: %v, %q", err, out)
+	}
+}
+
+// keyReader delivers one key per read, as terminals deliver escape sequences.
+type keyReader struct{ keys []string }
+
+func keys(keys ...string) *keyReader { return &keyReader{keys: keys} }
+
+func (r *keyReader) Read(buffer []byte) (int, error) {
+	if len(r.keys) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(buffer, r.keys[0])
+	r.keys = r.keys[1:]
+	return n, nil
+}

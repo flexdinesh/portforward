@@ -8,7 +8,7 @@ and configuration. Requires an installed OpenSSH client on macOS or Linux.
 ```sh
 portforward list [--json]
 portforward reconnect
-portforward add <port> <host> [--to <host:port>] [--bind <address>]
+portforward add [<host> [<port>]] [--to <host:port>] [--bind <address>]
 portforward remove [<port> [<host>]] [--bind <address>]
 portforward --help
 portforward --version
@@ -27,9 +27,11 @@ config initially, avoiding a second SSH configuration surface.
 
 | Example | Result |
 | --- | --- |
-| `add 5432 prod` | Local 5432 → prod's localhost:5432 |
-| `add 15432 prod --to localhost:5432` | Local 15432 → prod's localhost:5432 |
-| `add 15432 bastion --to db.internal:5432` | Local 15432 → database reachable from bastion |
+| `add prod 5432` | Local 5432 → prod's localhost:5432 |
+| `add prod 15432 --to localhost:5432` | Local 15432 → prod's localhost:5432 |
+| `add bastion 15432 --to db.internal:5432` | Local 15432 → database reachable from bastion |
+| `add` | Choose host and port interactively |
+| `add prod` | Choose port interactively |
 | `remove 15432` | Remove default-bind local 15432 |
 | `remove 5432 prod` | Remove only if its recorded SSH destination is prod |
 | `remove 5432 --bind ::1` | Remove the IPv6-loopback listener |
@@ -93,6 +95,37 @@ A missing entry succeeds with `No matching forward.` A host mismatch fails.
 Other forwards through the same host remain active; removing the last forward
 closes its owned master. Dead-master records can be removed safely without
 signalling stale PIDs.
+
+## Interactive add
+
+`portforward add` without a host opens an inline host picker, then a port
+prompt; `portforward add <host>` opens only the port prompt. Both require stdin
+and stdout to be terminals; otherwise they fail with the usage error and exit
+code `2`. `--to` and `--bind` are validated before any prompt and apply to the
+chosen mapping.
+
+```text
+Choose SSH host
+Filter: pro
+> prod     forward
+  prod-db  ssh config
+type to filter · ↑/↓ move · enter select · esc cancel
+```
+
+Rows list SSH hosts of managed forwards in `list` order, then concrete `Host`
+aliases from `~/.ssh/config` in file order, without duplicates. `Include`
+directives are followed (globs, `~`, paths relative to `~/.ssh`, 16 levels);
+unreadable includes are skipped. Patterns, `Match` blocks, and aliases that are
+not valid SSH hosts are not listed. A missing config lists no aliases; an
+unreadable config is an error. With no hosts it fails with exit code `1`; pass
+the host explicitly.
+
+Typing filters hosts by case-insensitive substring; only listed hosts can be
+chosen, so `j`, `k`, and `q` are text. `↑`/`↓` move, Backspace deletes, Ctrl-U
+clears, and `enter` chooses the highlighted host. The port prompt accepts digits
+and reports an invalid port inline. `esc` or Ctrl-C cancels either step with
+`Cancelled.` on stderr and exit code `130`. Controls clear themselves; the add
+then runs as if the host and port were given, including SSH authentication.
 
 ## Interactive remove
 
@@ -190,5 +223,5 @@ and recovery details.
   socket, and state diagnostics. Bulk removal exists only through the explicit
   interactive picker; add non-interactive bulk removal only with a clear selector.
 - Defer SOCKS, reverse forwarding, startup restoration, and a full-screen TUI.
-  The inline remove picker is not a full-screen TUI.
+  The inline add and remove pickers are not a full-screen TUI.
   They expand lifecycle and configuration complexity beyond this first use case.

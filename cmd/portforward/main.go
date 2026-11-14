@@ -21,47 +21,102 @@ import (
 	"github.com/flexdinesh/portforward/internal/forward"
 	"github.com/flexdinesh/portforward/internal/picker"
 	"github.com/flexdinesh/portforward/internal/ssh"
+	"github.com/flexdinesh/portforward/internal/sshconfig"
 	"github.com/flexdinesh/portforward/internal/state"
 	"github.com/flexdinesh/portforward/internal/version"
 	"golang.org/x/term"
 )
 
-// chooser selects rows interactively; nil means no interactive terminal.
-type chooser func(ctx context.Context, rows []string) ([]int, error)
+// ui holds interactive terminal controls; nil means no interactive terminal.
+type ui struct {
+	removeForwards func(ctx context.Context, rows []string) ([]int, error)
+	selectHost     func(ctx context.Context, choices []picker.Choice) (int, error)
+	readPort       func(ctx context.Context, host string) (int, error)
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, terminalChooser())
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, terminalUI())
 	stop()
 	os.Exit(code)
 }
 
-func terminalChooser() chooser {
+func terminalUI() *ui {
 	in, out := int(os.Stdin.Fd()), int(os.Stdout.Fd())
 	if !term.IsTerminal(in) || !term.IsTerminal(out) {
 		return nil
 	}
-	return func(ctx context.Context, rows []string) ([]int, error) {
+	color := os.Getenv("NO_COLOR") == ""
+	// raw runs one control in raw mode. Input stops before the terminal is
+	// restored, so no read outlives the control.
+	raw := func(control func(input io.Reader, width, height int) error) error {
 		width, height, err := term.GetSize(out)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		previous, err := term.MakeRaw(in)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		selected, err := picker.Run(ctx, os.Stdin, os.Stdout, picker.Options{
-			Title: "Remove forwards", Action: "remove", Rows: rows,
-			Width: width, Height: height, Color: os.Getenv("NO_COLOR") == "",
-		})
-		return selected, errors.Join(err, term.Restore(in, previous))
+		reader := &ttyReader{fd: in}
+		err = control(reader, width, height)
+		reader.stop()
+		return errors.Join(err, term.Restore(in, previous))
+	}
+	return &ui{
+		removeForwards: func(ctx context.Context, rows []string) ([]int, error) {
+			var selected []int
+			err := raw(func(input io.Reader, width, height int) error {
+				var err error
+				selected, err = picker.Run(ctx, input, os.Stdout, picker.Options{
+					Title: "Remove forwards", Action: "remove", Rows: rows,
+					Width: width, Height: height, Color: color,
+				})
+				return err
+			})
+			return selected, err
+		},
+		selectHost: func(ctx context.Context, choices []picker.Choice) (int, error) {
+			var selected int
+			err := raw(func(input io.Reader, width, height int) error {
+				var err error
+				selected, err = picker.Select(ctx, input, os.Stdout, picker.SelectOptions{
+					Title: "Choose SSH host", Choices: choices,
+					Width: width, Height: height, Color: color,
+				})
+				return err
+			})
+			return selected, err
+		},
+		readPort: func(ctx context.Context, host string) (int, error) {
+			var port int
+			err := raw(func(input io.Reader, width, _ int) error {
+				value, err := picker.Prompt(ctx, input, os.Stdout, picker.PromptOptions{
+					Label: "Local port for " + host + ":", Digits: true,
+					Validate: func(value string) error {
+						_, err := forward.ParsePort(value)
+						return err
+					},
+					Width: width, Color: color,
+				})
+				if err != nil {
+					return err
+				}
+				port, err = forward.ParsePort(value)
+				return err
+			})
+			return port, err
+		},
 	}
 }
 
-func run(ctx context.Context, input []string, stdout, stderr io.Writer, choose chooser) int {
+func run(ctx context.Context, input []string, stdout, stderr io.Writer, terminal *ui) int {
 	options, err := args.Parse(input)
-	if err == nil && options.Interactive && choose == nil {
+	if err == nil && options.Interactive && terminal == nil {
 		err = errors.New("usage: portforward remove <port> [<host>]")
+		if options.Command == "add" {
+			err = errors.New("usage: portforward add <host> <port>")
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "portforward: %s\n", err)
@@ -88,7 +143,7 @@ func run(ctx context.Context, input []string, stdout, stderr io.Writer, choose c
 	// Short, private paths avoid Unix socket limits even with a long state root.
 	client := ssh.New(socketDirectory(root), os.Stdin, os.Stdout, os.Stderr)
 	manager := forward.New(store, client)
-	err = execute(ctx, options, manager, stdout, stderr, choose)
+	err = execute(ctx, options, manager, stdout, stderr, terminal)
 	if errors.Is(err, picker.ErrCancelled) {
 		fmt.Fprintln(stderr, "Cancelled.")
 		return 130
@@ -122,7 +177,7 @@ func stateRoot() (string, error) {
 	return filepath.Join(home, ".local", "state", "portforward"), nil
 }
 
-func execute(ctx context.Context, options args.Options, manager *forward.Manager, stdout, stderr io.Writer, choose chooser) error {
+func execute(ctx context.Context, options args.Options, manager *forward.Manager, stdout, stderr io.Writer, terminal *ui) error {
 	switch options.Command {
 	case "list":
 		entries, diagnostics, err := manager.List(ctx)
@@ -157,7 +212,15 @@ func execute(ctx context.Context, options args.Options, manager *forward.Manager
 		}
 		return err
 	case "add":
-		changed, err := manager.Add(ctx, options.Mapping)
+		mapping := options.Mapping
+		if options.Interactive {
+			var err error
+			mapping, err = addInteractive(ctx, options, manager, stderr, terminal)
+			if err != nil {
+				return err
+			}
+		}
+		changed, err := manager.Add(ctx, mapping)
 		if err != nil {
 			return err
 		}
@@ -165,11 +228,11 @@ func execute(ctx context.Context, options args.Options, manager *forward.Manager
 		if !changed {
 			verb = "Already forwarding"
 		}
-		_, err = fmt.Fprintf(stdout, "%s %s → %s through %s.\n", verb, options.Mapping.Local(), options.Mapping.Destination(), options.Host)
+		_, err = fmt.Fprintf(stdout, "%s %s → %s through %s.\n", verb, mapping.Local(), mapping.Destination(), mapping.SSHHost)
 		return err
 	case "remove":
 		if options.Interactive {
-			return removeInteractive(ctx, manager, stdout, stderr, choose)
+			return removeInteractive(ctx, manager, stdout, stderr, terminal.removeForwards)
 		}
 		removed, err := manager.Remove(ctx, options.Bind, options.Port, options.Host)
 		if err != nil {
@@ -186,7 +249,66 @@ func execute(ctx context.Context, options args.Options, manager *forward.Manager
 	}
 }
 
-func removeInteractive(ctx context.Context, manager *forward.Manager, stdout, stderr io.Writer, choose chooser) error {
+// addInteractive chooses the missing host and port, then builds the mapping
+// that the normal add path applies.
+func addInteractive(ctx context.Context, options args.Options, manager *forward.Manager, stderr io.Writer, terminal *ui) (forward.Mapping, error) {
+	host := options.Host
+	if host == "" {
+		choices, err := hostChoices(ctx, manager, stderr)
+		if err != nil {
+			return forward.Mapping{}, err
+		}
+		if len(choices) == 0 {
+			return forward.Mapping{}, errors.New("no SSH hosts found; run portforward add <host> <port>")
+		}
+		index, err := terminal.selectHost(ctx, choices)
+		if err != nil {
+			return forward.Mapping{}, err
+		}
+		host = choices[index].Value
+	}
+	port, err := terminal.readPort(ctx, host)
+	if err != nil {
+		return forward.Mapping{}, err
+	}
+	return forward.NewMapping(options.Bind, port, host, options.Destination)
+}
+
+// hostChoices lists hosts of managed forwards, then SSH config aliases.
+func hostChoices(ctx context.Context, manager *forward.Manager, stderr io.Writer) ([]picker.Choice, error) {
+	entries, diagnostics, err := manager.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, diagnostic := range diagnostics {
+		fmt.Fprintf(stderr, "portforward: %s\n", diagnostic)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	aliases, err := sshconfig.Hosts(home)
+	if err != nil {
+		return nil, fmt.Errorf("read SSH config: %w", err)
+	}
+	var choices []picker.Choice
+	seen := make(map[string]bool)
+	for _, entry := range entries {
+		if !seen[entry.SSHHost] {
+			seen[entry.SSHHost] = true
+			choices = append(choices, picker.Choice{Value: entry.SSHHost, Note: "forward"})
+		}
+	}
+	for _, alias := range aliases {
+		if !seen[alias] && forward.ValidateSSHHost(alias) == nil {
+			seen[alias] = true
+			choices = append(choices, picker.Choice{Value: alias, Note: "ssh config"})
+		}
+	}
+	return choices, nil
+}
+
+func removeInteractive(ctx context.Context, manager *forward.Manager, stdout, stderr io.Writer, choose func(context.Context, []string) ([]int, error)) error {
 	entries, diagnostics, err := manager.List(ctx)
 	if err != nil {
 		return err

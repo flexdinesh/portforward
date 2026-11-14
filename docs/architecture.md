@@ -2,7 +2,8 @@
 
 One CLI mode, one Go module, no application daemon. Production dependencies are
 the Go executable and an installed OpenSSH client; `golang.org/x/term` provides
-raw terminal mode for the interactive remove picker. Build tools and the optional
+raw terminal mode for interactive add and remove; `golang.org/x/sys` provides
+bounded terminal reads. Build tools and the optional
 integration-test SSH server are development dependencies.
 
 ## Ownership and dependencies
@@ -11,6 +12,7 @@ integration-test SSH server are development dependencies.
 cmd/portforward -> args -> forward
                -> forward
                -> picker
+               -> sshconfig
                -> state -> forward, privatefs
                -> ssh   -> forward, privatefs
                -> version
@@ -38,10 +40,21 @@ never connect to a new server. Three-second deadlines bound checks, additions,
 cancellations, and shutdown requests. Only startup can authenticate. No PIDs
 are persisted or signalled in production; shutdown uses the owned control socket.
 
-`picker` owns key parsing and inline rendering for interactive selection. It
-reads bytes and writes ANSI output; `cmd/portforward` owns terminal detection,
-raw mode, and removal. Interactive removal lists entries, then calls the normal
-remove path per choice with the recorded host as a guard.
+`picker` owns key parsing and inline rendering for interactive controls: the
+multi-select remove list, the filtered single-choice host list, and the line
+prompt. It reads bytes and writes ANSI output; `cmd/portforward` owns terminal
+detection, raw mode, and the commands. Interactive removal lists entries, then
+calls the normal remove path per choice with the recorded host as a guard.
+Interactive add chooses a host and port, then calls the normal add path.
+
+Each control reads through a terminal reader that waits with select(2) in short
+intervals. `cmd/portforward` stops it and waits for in-flight reads before
+restoring the terminal, so no stale read steals the next prompt or OpenSSH
+authentication input.
+
+`sshconfig` lists concrete `Host` aliases from `~/.ssh/config` and its includes
+as choices only. It does not evaluate `Match` or resolve hosts; OpenSSH stays
+authoritative.
 
 `privatefs` owns the shared rule for control-data paths: current-user ownership,
 0700 directories, 0600 regular files, and rejection of final-component symlinks.
