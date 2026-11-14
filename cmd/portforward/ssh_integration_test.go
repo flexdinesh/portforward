@@ -174,7 +174,7 @@ func TestRealSSH(t *testing.T) {
 	t.Cleanup(func() { application.Close(); <-finished })
 	a, b := freePort(t), freePort(t)
 	add := func(port int) string {
-		return invoke(0, "add", strconv.Itoa(port), "testhost", "--to", application.Addr().String())
+		return invoke(0, "add", "testhost", strconv.Itoa(port), "--to", application.Addr().String())
 	}
 	add(a)
 	add(b)
@@ -205,7 +205,7 @@ func TestRealSSH(t *testing.T) {
 	}
 	// Binding a tunnel does not require the remote application to be running.
 	c := freePort(t)
-	invoke(0, "add", strconv.Itoa(c), "testhost", "--to", fmt.Sprintf("localhost:%d", freePort(t)))
+	invoke(0, "add", "testhost", strconv.Itoa(c), "--to", fmt.Sprintf("localhost:%d", freePort(t)))
 	for _, entry := range list() {
 		if entry.LocalPort == c && entry.Status != "active" {
 			t.Fatal("application availability must not define tunnel status")
@@ -219,7 +219,7 @@ func TestRealSSH(t *testing.T) {
 		}
 		port := probe.Addr().(*net.TCPAddr).Port
 		probe.Close()
-		invoke(0, "add", strconv.Itoa(port), "testhost", "--bind", "::1", "--to", application.Addr().String())
+		invoke(0, "add", "testhost", strconv.Itoa(port), "--bind", "::1", "--to", application.Addr().String())
 		t.Cleanup(func() { invoke(0, "remove", strconv.Itoa(port), "--bind", "::1") })
 		conn, err := net.DialTimeout("tcp6", fmt.Sprintf("[::1]:%d", port), time.Second)
 		if err != nil {
@@ -245,7 +245,7 @@ func TestRealSSH(t *testing.T) {
 	}
 	t.Cleanup(func() { busy.Close() })
 	_, busyPort, _ := net.SplitHostPort(busy.Addr().String())
-	invoke(1, "add", busyPort, "testhost", "--to", application.Addr().String())
+	invoke(1, "add", "testhost", busyPort, "--to", application.Addr().String())
 	if len(list()) != 2 {
 		t.Fatal("failed busy-port add must roll back state")
 	}

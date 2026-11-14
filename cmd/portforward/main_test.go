@@ -41,7 +41,10 @@ func TestRun(t *testing.T) {
 		{name: "missing remove", args: []string{"remove", "5432", "prod"}, stdout: "No matching forward.\n"},
 		{name: "interactive remove without terminal", args: []string{"remove"}, code: 2, stderr: "usage: portforward remove <port> [<host>]"},
 		{name: "remove bind without port", args: []string{"remove", "--bind", "::1"}, code: 2, stderr: "usage: portforward remove"},
-		{name: "invalid add", args: []string{"add", "0", "prod"}, code: 2, stderr: "invalid port"},
+		{name: "invalid add", args: []string{"add", "prod", "0"}, code: 2, stderr: "invalid port"},
+		{name: "old add order", args: []string{"add", "5432", "prod"}, code: 2, stderr: `invalid port "prod"`},
+		{name: "interactive add without terminal", args: []string{"add"}, code: 2, stderr: "usage: portforward add <host> <port>"},
+		{name: "interactive add host without terminal", args: []string{"add", "prod"}, code: 2, stderr: "usage: portforward add <host> <port>"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -69,7 +72,7 @@ func TestConfigurationErrorsDoNotChangeDestination(t *testing.T) {
 	}{
 		{[]string{"--help"}, 0},
 		{[]string{"--version"}, 0},
-		{[]string{"add", "0", "prod"}, 2},
+		{[]string{"add", "prod", "0"}, 2},
 		{[]string{"list"}, 1},
 		{[]string{"reconnect"}, 1},
 	} {
@@ -132,7 +135,7 @@ func TestInteractiveRemove(t *testing.T) {
 		return []int{0, 2}, nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, choose); code != 0 {
+	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, &ui{removeForwards: choose}); code != 0 {
 		t.Fatalf("exit = %d: %s", code, stderr.String())
 	}
 	if len(rows) != 3 || !strings.HasPrefix(rows[0], "127.0.0.1:5432  prod   localhost:5432  disconnected") {
@@ -153,7 +156,7 @@ func TestInteractiveRemoveEmpty(t *testing.T) {
 		return nil, nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, choose); code != 0 || stdout.String() != "No managed forwards.\n" {
+	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, &ui{removeForwards: choose}); code != 0 || stdout.String() != "No managed forwards.\n" {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -162,7 +165,7 @@ func TestInteractiveRemoveCancel(t *testing.T) {
 	store, _ := seed(t, record(t, "127.0.0.1", 5432, "prod", "a"))
 	choose := func(context.Context, []string) ([]int, error) { return nil, picker.ErrCancelled }
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, choose); code != 130 || stderr.String() != "Cancelled.\n" || stdout.Len() != 0 {
+	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, &ui{removeForwards: choose}); code != 130 || stderr.String() != "Cancelled.\n" || stdout.Len() != 0 {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	if got := remaining(t, store); len(got) != 1 {
@@ -184,7 +187,7 @@ func TestInteractiveRemoveContinuesAfterFailure(t *testing.T) {
 	}
 	choose := func(context.Context, []string) ([]int, error) { return []int{0, 1}, nil }
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, choose); code != 1 {
+	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, &ui{removeForwards: choose}); code != 1 {
 		t.Fatalf("exit = %d", code)
 	}
 	if stdout.String() != "Removed 127.0.0.1:6379.\n" {
@@ -202,7 +205,128 @@ func TestInteractiveRemoveChooserError(t *testing.T) {
 	seed(t, record(t, "127.0.0.1", 5432, "prod", "a"))
 	choose := func(context.Context, []string) ([]int, error) { return nil, errors.New("terminal gone") }
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, choose); code != 1 || stderr.String() != "portforward: terminal gone\n" {
+	if code := run(context.Background(), []string{"remove"}, &stdout, &stderr, &ui{removeForwards: choose}); code != 1 || stderr.String() != "portforward: terminal gone\n" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+// sshHome points HOME at a directory whose SSH config holds config.
+func sshHome(t *testing.T, config string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if config == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInteractiveAdd(t *testing.T) {
+	store, _ := seed(t,
+		record(t, "127.0.0.1", 5432, "prod", "a"),
+		record(t, "127.0.0.1", 6379, "cache", "b"),
+		record(t, "::1", 8080, "prod", "c"),
+	)
+	sshHome(t, "Host cache bastion *.internal\nHost bad;host\nHost user@jump\n")
+	var choices []picker.Choice
+	var prompted string
+	terminal := &ui{
+		selectHost: func(_ context.Context, got []picker.Choice) (int, error) {
+			choices = got
+			return 2, nil
+		},
+		readPort: func(_ context.Context, host string) (int, error) {
+			prompted = host
+			return 6379, nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	// The chosen listener conflicts, so the mapping reaches add without SSH.
+	if code := run(context.Background(), []string{"add"}, &stdout, &stderr, terminal); code != 1 {
+		t.Fatalf("exit = %d: %s", code, stderr.String())
+	}
+	want := []picker.Choice{{Value: "prod", Note: "forward"}, {Value: "cache", Note: "forward"}, {Value: "bastion", Note: "ssh config"}, {Value: "user@jump", Note: "ssh config"}}
+	if !slices.Equal(choices, want) {
+		t.Fatalf("choices = %v", choices)
+	}
+	if prompted != "bastion" {
+		t.Fatalf("prompted host = %q", prompted)
+	}
+	if got := stderr.String(); got != "portforward: 127.0.0.1:6379 already maps to localhost:6379 through cache; remove it first\n" {
+		t.Fatalf("stderr = %q", got)
+	}
+	if got := remaining(t, store); len(got) != 3 {
+		t.Fatalf("remaining = %v", got)
+	}
+}
+
+func TestInteractiveAddWithHost(t *testing.T) {
+	seed(t, record(t, "::1", 5432, "prod", "a"))
+	sshHome(t, "Host prod\n")
+	var prompted string
+	terminal := &ui{
+		selectHost: func(context.Context, []picker.Choice) (int, error) {
+			t.Fatal("host picker opened for an explicit host")
+			return 0, nil
+		},
+		readPort: func(_ context.Context, host string) (int, error) {
+			prompted = host
+			return 5432, nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"add", "other", "--bind", "::1", "--to", "db:5432"}, &stdout, &stderr, terminal)
+	if code != 1 || prompted != "other" || !strings.Contains(stderr.String(), "[::1]:5432 already maps to localhost:5432 through prod") {
+		t.Fatalf("exit = %d, prompted = %q, stderr = %q", code, prompted, stderr.String())
+	}
+}
+
+func TestInteractiveAddCancel(t *testing.T) {
+	seed(t)
+	sshHome(t, "Host prod\n")
+	for name, terminal := range map[string]*ui{
+		"host": {selectHost: func(context.Context, []picker.Choice) (int, error) { return 0, picker.ErrCancelled }},
+		"port": {
+			selectHost: func(context.Context, []picker.Choice) (int, error) { return 0, nil },
+			readPort:   func(context.Context, string) (int, error) { return 0, picker.ErrCancelled },
+		},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(context.Background(), []string{"add"}, &stdout, &stderr, terminal); code != 130 || stderr.String() != "Cancelled.\n" || stdout.Len() != 0 {
+			t.Fatalf("%s: exit = %d, stdout = %q, stderr = %q", name, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestInteractiveAddWithoutHosts(t *testing.T) {
+	seed(t)
+	sshHome(t, "Host *\n")
+	terminal := &ui{selectHost: func(context.Context, []picker.Choice) (int, error) {
+		t.Fatal("host picker opened without hosts")
+		return 0, nil
+	}}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"add"}, &stdout, &stderr, terminal); code != 1 || stderr.String() != "portforward: no SSH hosts found; run portforward add <host> <port>\n" {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestInteractiveAddUnreadableConfig(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads files regardless of mode")
+	}
+	seed(t)
+	sshHome(t, "Host prod\n")
+	if err := os.Chmod(filepath.Join(os.Getenv("HOME"), ".ssh", "config"), 0); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"add"}, &stdout, &stderr, &ui{}); code != 1 || !strings.HasPrefix(stderr.String(), "portforward: read SSH config: ") {
 		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
 }

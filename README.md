@@ -18,9 +18,10 @@ mise run install
 ## Usage
 
 ```sh
-portforward add 5432 prod
-portforward add 15432 prod --to localhost:5432
-portforward add 15432 bastion --to db.internal:5432
+portforward add
+portforward add prod 5432
+portforward add prod 15432 --to localhost:5432
+portforward add bastion 15432 --to db.internal:5432
 portforward list
 portforward list --json
 portforward reconnect
@@ -32,6 +33,7 @@ portforward --help
 
 Default: `127.0.0.1:<port>` → remote `localhost:<port>`. Use `--to` to change the
 destination; `--bind` to change the local address. Tunnels survive terminal closure.
+Run `add` or `remove` without arguments in a terminal to choose interactively.
 `list` shows managed tunnels only. Run `reconnect` to restore all disconnected
 tunnels using their saved mappings; active tunnels stay untouched. Repeat `add`
 to reconnect one tunnel.

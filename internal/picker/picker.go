@@ -1,4 +1,4 @@
-// Package picker renders an inline, keyboard-driven multi-select list on a raw
+// Package picker renders inline, keyboard-driven terminal controls on a raw
 // terminal. Callers own terminal modes; the picker only reads keys and writes
 // ANSI output, so tests can drive it with plain byte streams.
 package picker
@@ -13,6 +13,7 @@ import (
 
 var ErrCancelled = errors.New("cancelled")
 
+// Options configures the multi-select list used by Run.
 type Options struct {
 	Title  string
 	Action string
@@ -23,22 +24,12 @@ type Options struct {
 	Color  bool
 }
 
-type key int
-
-const (
-	keyUp key = iota
-	keyDown
-	keyToggle
-	keyEnter
-	keyCancel
-)
-
 type model struct {
+	screen
 	options  Options
 	cursor   int
 	offset   int
 	selected []bool
-	drawn    int
 }
 
 // Run returns selected row indices in row order. Without explicit selections,
@@ -47,7 +38,88 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, options Options) ([]i
 	if len(options.Rows) == 0 {
 		return nil, errors.New("picker requires rows")
 	}
-	m := &model{options: options, selected: make([]bool, len(options.Rows))}
+	m := &model{
+		screen:   screen{out: out, width: options.Width, color: options.Color},
+		options:  options,
+		selected: make([]bool, len(options.Rows)),
+	}
+	var result []int
+	err := drive(ctx, in, &m.screen, false, m.lines, func(e event) bool {
+		switch e.key {
+		case keyUp:
+			m.cursor = max(m.cursor-1, 0)
+		case keyDown:
+			m.cursor = min(m.cursor+1, len(m.options.Rows)-1)
+		case keyToggle:
+			m.selected[m.cursor] = !m.selected[m.cursor]
+		case keyEnter:
+			result = m.choice()
+			return true
+		}
+		return false
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (m *model) choice() []int {
+	var result []int
+	for i, selected := range m.selected {
+		if selected {
+			result = append(result, i)
+		}
+	}
+	if len(result) == 0 {
+		return []int{m.cursor}
+	}
+	return result
+}
+
+func (m *model) lines() []string {
+	visible := visibleRows(len(m.options.Rows), m.options.Height, 2)
+	m.offset = scroll(m.cursor, m.offset, visible)
+	lines := []string{m.fit(title(m.options.Title, m.cursor, len(m.options.Rows), visible))}
+	for i := m.offset; i < m.offset+visible; i++ {
+		marker, box := "  ", "[ ] "
+		if i == m.cursor {
+			marker = "> "
+		}
+		if m.selected[i] {
+			box = "[x] "
+		}
+		line := m.fit(marker + box + m.options.Rows[i])
+		if i == m.cursor {
+			line = m.style("1", line)
+		}
+		lines = append(lines, line)
+	}
+	count := len(m.choice())
+	return append(lines, m.style("2", m.fit(fmt.Sprintf("↑/↓ move · space select · enter %s %d · esc cancel", m.options.Action, count))))
+}
+
+type key int
+
+const (
+	keyUp key = iota
+	keyDown
+	keyToggle
+	keyEnter
+	keyCancel
+	keyText
+	keyBackspace
+	keyClear
+)
+
+type event struct {
+	key  key
+	char byte
+}
+
+// drive hides the cursor and renders until handle reports completion or the
+// input, context, or user cancels. The control is always cleared afterwards.
+func drive(ctx context.Context, in io.Reader, s *screen, text bool, render func() []string, handle func(event) bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	chunks := make(chan []byte)
@@ -70,76 +142,55 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, options Options) ([]i
 			}
 		}
 	}()
-	if _, err := io.WriteString(out, "\x1b[?25l"); err != nil {
-		return nil, err
+	if _, err := io.WriteString(s.out, "\x1b[?25l"); err != nil {
+		return err
 	}
-	result, err := m.loop(ctx, out, chunks, failures)
-	return result, errors.Join(err, m.clear(out))
+	err := loop(ctx, s, text, render, handle, chunks, failures)
+	return errors.Join(err, s.clear())
 }
 
-func (m *model) loop(ctx context.Context, out io.Writer, chunks <-chan []byte, failures <-chan error) ([]int, error) {
+func loop(ctx context.Context, s *screen, text bool, render func() []string, handle func(event) bool, chunks <-chan []byte, failures <-chan error) error {
 	for {
-		if err := m.render(out); err != nil {
-			return nil, err
+		if err := s.draw(render()); err != nil {
+			return err
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		case err := <-failures:
 			if errors.Is(err, io.EOF) {
-				return nil, io.ErrUnexpectedEOF
+				return io.ErrUnexpectedEOF
 			}
-			return nil, err
+			return err
 		case chunk := <-chunks:
-			for _, k := range parse(chunk) {
-				switch k {
-				case keyUp:
-					m.cursor = max(m.cursor-1, 0)
-				case keyDown:
-					m.cursor = min(m.cursor+1, len(m.options.Rows)-1)
-				case keyToggle:
-					m.selected[m.cursor] = !m.selected[m.cursor]
-				case keyEnter:
-					return m.choice(), nil
-				case keyCancel:
-					return nil, ErrCancelled
+			for _, e := range parse(chunk, text) {
+				if e.key == keyCancel {
+					return ErrCancelled
+				}
+				if handle(e) {
+					return nil
 				}
 			}
 		}
 	}
 }
 
-func (m *model) choice() []int {
-	var result []int
-	for i, selected := range m.selected {
-		if selected {
-			result = append(result, i)
-		}
-	}
-	if len(result) == 0 {
-		return []int{m.cursor}
-	}
-	return result
-}
-
-func parse(chunk []byte) []key {
-	var keys []key
+// parse decodes keys. In text mode printable ASCII is input, so only arrows,
+// escape, and control keys navigate or cancel.
+func parse(chunk []byte, text bool) []event {
+	var events []event
+	add := func(k key) { events = append(events, event{key: k}) }
 	for i := 0; i < len(chunk); i++ {
-		switch chunk[i] {
-		case 'k':
-			keys = append(keys, keyUp)
-		case 'j':
-			keys = append(keys, keyDown)
-		case ' ':
-			keys = append(keys, keyToggle)
-		case '\r', '\n':
-			keys = append(keys, keyEnter)
-		case 'q', 0x03, 0x04:
-			keys = append(keys, keyCancel)
-		case 0x1b:
+		c := chunk[i]
+		switch {
+		case c == '\r' || c == '\n':
+			add(keyEnter)
+		case c == 0x03 || c == 0x04:
+			add(keyCancel)
+		case c == 0x1b:
 			// A lone escape cancels; CSI/SS3 sequences carry arrows or are ignored.
 			if i+1 >= len(chunk) || chunk[i+1] != '[' && chunk[i+1] != 'O' {
-				keys = append(keys, keyCancel)
+				add(keyCancel)
 				continue
 			}
 			end := i + 2
@@ -149,96 +200,104 @@ func parse(chunk []byte) []key {
 			if end < len(chunk) {
 				switch chunk[end] {
 				case 'A':
-					keys = append(keys, keyUp)
+					add(keyUp)
 				case 'B':
-					keys = append(keys, keyDown)
+					add(keyDown)
 				}
 			}
 			i = end
+		case text && (c == 0x7f || c == 0x08):
+			add(keyBackspace)
+		case text && c == 0x15:
+			add(keyClear)
+		case text && c >= 0x20 && c <= 0x7e:
+			events = append(events, event{key: keyText, char: c})
+		case !text && c == 'k':
+			add(keyUp)
+		case !text && c == 'j':
+			add(keyDown)
+		case !text && c == ' ':
+			add(keyToggle)
+		case !text && c == 'q':
+			add(keyCancel)
 		}
 	}
-	return keys
+	return events
 }
 
-func (m *model) visible() int {
-	if m.options.Height <= 0 {
-		return len(m.options.Rows)
+// visibleRows reserves chrome lines for titles, inputs, and hints.
+func visibleRows(rows, height, chrome int) int {
+	if height <= 0 {
+		return rows
 	}
-	return max(1, min(len(m.options.Rows), m.options.Height-2))
+	return max(1, min(rows, height-chrome))
 }
 
-func (m *model) render(out io.Writer) error {
-	visible := m.visible()
-	if m.cursor < m.offset {
-		m.offset = m.cursor
+func scroll(cursor, offset, visible int) int {
+	if cursor < offset {
+		return cursor
 	}
-	if m.cursor >= m.offset+visible {
-		m.offset = m.cursor - visible + 1
+	if cursor >= offset+visible {
+		return cursor - visible + 1
 	}
-	lines := []string{m.fit(m.title(visible))}
-	for i := m.offset; i < m.offset+visible; i++ {
-		marker, box := "  ", "[ ] "
-		if i == m.cursor {
-			marker = "> "
-		}
-		if m.selected[i] {
-			box = "[x] "
-		}
-		line := m.fit(marker + box + m.options.Rows[i])
-		if i == m.cursor {
-			line = m.style("1", line)
-		}
-		lines = append(lines, line)
+	return offset
+}
+
+func title(text string, cursor, rows, visible int) string {
+	if visible >= rows {
+		return text
 	}
-	count := len(m.choice())
-	lines = append(lines, m.style("2", m.fit(fmt.Sprintf("↑/↓ move · space select · enter %s %d · esc cancel", m.options.Action, count))))
+	return fmt.Sprintf("%s (%d/%d)", text, cursor+1, rows)
+}
+
+type screen struct {
+	out   io.Writer
+	width int
+	color bool
+	drawn int
+}
+
+func (s *screen) draw(lines []string) error {
 	var b strings.Builder
-	m.rewind(&b)
+	s.rewind(&b)
 	b.WriteString(strings.Join(lines, "\r\n"))
-	m.drawn = len(lines)
-	_, err := io.WriteString(out, b.String())
+	s.drawn = len(lines)
+	_, err := io.WriteString(s.out, b.String())
 	return err
 }
 
-func (m *model) title(visible int) string {
-	if visible == len(m.options.Rows) {
-		return m.options.Title
-	}
-	return fmt.Sprintf("%s (%d/%d)", m.options.Title, m.cursor+1, len(m.options.Rows))
-}
-
 // rewind moves to the first drawn line and clears everything below it.
-func (m *model) rewind(b *strings.Builder) {
-	if m.drawn == 0 {
+func (s *screen) rewind(b *strings.Builder) {
+	if s.drawn == 0 {
 		return
 	}
 	b.WriteString("\r")
-	if m.drawn > 1 {
-		fmt.Fprintf(b, "\x1b[%dA", m.drawn-1)
+	if s.drawn > 1 {
+		fmt.Fprintf(b, "\x1b[%dA", s.drawn-1)
 	}
 	b.WriteString("\x1b[J")
 }
 
-func (m *model) clear(out io.Writer) error {
+func (s *screen) clear() error {
 	var b strings.Builder
-	m.rewind(&b)
+	s.rewind(&b)
 	b.WriteString("\x1b[?25h")
-	m.drawn = 0
-	_, err := io.WriteString(out, b.String())
+	s.drawn = 0
+	_, err := io.WriteString(s.out, b.String())
 	return err
 }
 
 // fit keeps each line on one terminal row so rewinding stays exact.
-func (m *model) fit(line string) string {
+func (s *screen) fit(line string) string {
 	runes := []rune(line)
-	if m.options.Width <= 1 || len(runes) < m.options.Width {
+	if s.width <= 1 || len(runes) < s.width {
 		return line
 	}
-	return string(runes[:m.options.Width-1])
+	return string(runes[:s.width-1])
 }
 
-func (m *model) style(code, line string) string {
-	if !m.options.Color {
+func (s *screen) style(code, line string) string {
+	if !s.color {
 		return line
 	}
 	return "\x1b[" + code + "m" + line + "\x1b[0m"

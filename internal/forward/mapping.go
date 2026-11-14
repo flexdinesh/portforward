@@ -26,20 +26,31 @@ func NewMapping(bind string, port int, host, destination string) (Mapping, error
 	}
 	m := Mapping{BindAddress: bind, LocalPort: port, SSHHost: host, RemoteHost: "localhost", RemotePort: port}
 	if destination != "" {
-		remoteHost, remotePort, err := net.SplitHostPort(destination)
-		if err != nil {
-			return Mapping{}, fmt.Errorf("invalid destination %q: expected host:port", destination)
-		}
-		m.RemoteHost = remoteHost
-		m.RemotePort, err = ParsePort(remotePort)
+		m.RemoteHost, m.RemotePort, err = ParseDestination(destination)
 		if err != nil {
 			return Mapping{}, err
 		}
-		if ip, err := netip.ParseAddr(remoteHost); err == nil {
-			m.RemoteHost = ip.Unmap().String()
-		}
 	}
 	return m, m.Validate()
+}
+
+// ParseDestination parses a --to value as seen from the SSH server.
+func ParseDestination(destination string) (string, int, error) {
+	host, value, err := net.SplitHostPort(destination)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid destination %q: expected host:port", destination)
+	}
+	port, err := ParsePort(value)
+	if err != nil {
+		return "", 0, err
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		host = ip.Unmap().String()
+	}
+	if err := validateRemoteHost(host); err != nil {
+		return "", 0, err
+	}
+	return host, port, nil
 }
 
 func ParsePort(value string) (int, error) {
@@ -89,15 +100,19 @@ func (m Mapping) Validate() error {
 	if err := ValidateSSHHost(m.SSHHost); err != nil {
 		return err
 	}
-	if ip, err := netip.ParseAddr(m.RemoteHost); err == nil && ip.Zone() == "" {
+	return validateRemoteHost(m.RemoteHost)
+}
+
+func validateRemoteHost(host string) error {
+	if ip, err := netip.ParseAddr(host); err == nil && ip.Zone() == "" {
 		return nil
 	}
-	if m.RemoteHost == "" || len(m.RemoteHost) > 253 || strings.HasPrefix(m.RemoteHost, "-") {
-		return fmt.Errorf("invalid remote host %q", m.RemoteHost)
+	if host == "" || len(host) > 253 || strings.HasPrefix(host, "-") {
+		return fmt.Errorf("invalid remote host %q", host)
 	}
-	for _, c := range m.RemoteHost {
+	for _, c := range host {
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._-", c)) {
-			return fmt.Errorf("invalid remote host %q", m.RemoteHost)
+			return fmt.Errorf("invalid remote host %q", host)
 		}
 	}
 	return nil
