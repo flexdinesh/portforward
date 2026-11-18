@@ -1,0 +1,28 @@
+{
+  "name": "portforward-cover",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Source for docs/assets/cover.webp, the README cover animation.",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "export": "vite build && node export.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "playwright-core": "~1.48.2",
+    "typescript": "^5.6.3",
+    "vite": "^6.4.5"
+  }
+}
